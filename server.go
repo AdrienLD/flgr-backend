@@ -1,8 +1,11 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -11,6 +14,7 @@ import (
 	"github.com/AdrienLD/flgr-backend/songs"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	_ "modernc.org/sqlite"
 )
 
 var websiteAccess string = "https://songs.flgr.fr"
@@ -21,6 +25,10 @@ func init() {
 	if err := godotenv.Load(); err != nil {
 		panic("Erreur lors du chargement du fichier .env")
 	}
+}
+
+type Track struct {
+	Name string `json:"name"`
 }
 
 func main() {
@@ -50,6 +58,7 @@ func main() {
 	router.POST("/api/newplaylist", getPlaylist)
 	router.POST("/api/replaceplaylist", replaceplaylist)
 	router.POST("/api/nextmusic", nextMusic)
+	router.POST("/api/searchmusic", searchmusic)
 
 	router.Run(":4000")
 }
@@ -463,4 +472,66 @@ func nextMusic(c *gin.Context) {
 	putAPICall(url, token)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Musique suivante"})
+}
+
+func searchmusic(c *gin.Context) {
+	var requestBody struct {
+		Artist string `json:"artist"`
+		Titre  string `json:"title"`
+	}
+	if err := c.BindJSON(&requestBody); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Données requete invalides"})
+		return
+	}
+
+	db, err := sql.Open("sqlite", "db.sqlite3")
+	if err != nil {
+		fmt.Printf("Erreur ouverture DB : %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Données invalides"})
+		return
+	}
+
+	defer db.Close()
+
+	//consolelog
+	fmt.Printf("Recherche de la musique : %s - %s\n", requestBody.Artist, requestBody.Titre)
+
+	query := `
+	SELECT lyrics.synced_lyrics
+	FROM tracks
+	JOIN lyrics ON lyrics.id = tracks.last_lyrics_id
+	WHERE lyrics.synced_lyrics IS NOT NULL
+	AND tracks.name_lower LIKE ?
+	AND tracks.artist_name_lower LIKE ?
+	LIMIT 1
+	`
+
+	rows := db.QueryRow(
+		query,
+		"%"+strings.ToLower(requestBody.Titre)+"%",
+		"%"+strings.ToLower(requestBody.Artist)+"%",
+	)
+
+	var syncedLyrics string
+	err = rows.Scan(&syncedLyrics)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Paroles non trouvées"})
+		} else {
+			log.Printf("Erreur requête : %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur base de données"})
+		}
+		return
+	}
+
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors de la lecture des résultats"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"artist":        requestBody.Artist,
+		"title":         requestBody.Titre,
+		"synced_lyrics": syncedLyrics,
+	})
 }
