@@ -62,7 +62,7 @@ func main() {
 	router.POST("/api/replaceplaylist", replaceplaylist)
 	router.POST("/api/nextmusic", nextMusic)
 	router.POST("/api/searchmusic", searchmusic)
-	router.GET("/api/testBDD", testBDD)
+	router.POST("/api/testBDD", testBDD)
 
 	router.Run(":4000")
 }
@@ -547,44 +547,62 @@ func searchmusic(c *gin.Context) {
 	})
 }
 
+type PlaylistItem2 struct {
+	Titre   string `json:"title"`
+	Artiste string `json:"artist"`
+}
+
+type PlaylistRequest struct {
+	Playlist []PlaylistItem2 `json:"playlist"`
+}
+
 func testBDD(c *gin.Context) {
+	var req PlaylistRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Données invalides"})
+		return
+	}
+	var musicsNotFound []PlaylistItem2
+	playlist := req.Playlist
+
 	start := time.Now()
 	found := 0
-	for _, list := range AllPlaylists {
-		for _, musique := range list {
-			payload := map[string]string{
-				"artist": musique.Artiste,
-				"title":  musique.Titre,
-			}
-			body, err := json.Marshal(payload)
-			if err != nil {
-				log.Printf("Erreur json.Marshal pour %s - %s : %v", musique.Titre, musique.Artiste, err)
-				continue
-			}
-
-			// Envoi de la requête
-			resp, err := http.Post(
-				"http://localhost:4000/api/searchmusic",
-				"application/json",
-				bytes.NewBuffer(body),
-			)
-			if err != nil {
-				log.Printf("Erreur http.Post pour %s - %s : %v", musique.Titre, musique.Artiste, err)
-				continue
-			}
-
-			if resp.StatusCode == 200 {
-				found++
-			}
-			resp.Body.Close()
+	for _, musique := range playlist {
+		requestBody := map[string]string{
+			"title":  musique.Titre,
+			"artist": musique.Artiste,
 		}
+		body, err := json.Marshal(requestBody)
+		if err != nil {
+			log.Printf("Erreur encodage JSON pour %s - %s : %v", musique.Titre, musique.Artiste, err)
+			continue
+		}
+		resp, err := http.Post(
+			"http://localhost:4000/api/searchmusic",
+			"application/json",
+			bytes.NewBuffer(body),
+		)
+		if err != nil {
+			log.Printf("Erreur http.Post pour %s - %s : %v", musique.Titre, musique.Artiste, err)
+			continue
+		}
+
+		if resp.StatusCode == 200 {
+			found++
+		} else if resp.StatusCode == 404 {
+			musicsNotFound = append(musicsNotFound, musique)
+		}
+		resp.Body.Close()
 	}
+
 	fmt.Println("timeDuration :", time.Since(start).Seconds())
 	fmt.Println("totalFound : ", found)
 
 	c.JSON(http.StatusOK, gin.H{
-		"timeDuration": time.Since(start).Seconds(),
-		"totalFound":   found,
+		"timeDuration":   time.Since(start).Seconds(),
+		"totalFound":     found,
+		"musicsNotFound": musicsNotFound,
+		"totalTested":    len(playlist),
 	})
 }
 
