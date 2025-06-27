@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/AdrienLD/flgr-backend/songs"
 	"github.com/gin-gonic/gin"
@@ -17,7 +19,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var websiteAccess string = "https://songs.flgr.fr"
+// var websiteAccess string = "https://songs.flgr.fr"
+var websiteAccess string = "http://localhost:3000"
 
 var httpClient = &http.Client{}
 
@@ -59,6 +62,7 @@ func main() {
 	router.POST("/api/replaceplaylist", replaceplaylist)
 	router.POST("/api/nextmusic", nextMusic)
 	router.POST("/api/searchmusic", searchmusic)
+	router.GET("/api/testBDD", testBDD)
 
 	router.Run(":4000")
 }
@@ -493,27 +497,31 @@ func searchmusic(c *gin.Context) {
 
 	defer db.Close()
 
-	//consolelog
-	fmt.Printf("Recherche de la musique : %s - %s\n", requestBody.Artist, requestBody.Titre)
+	fmt.Printf("Recherche de la musique : %s / %s\n", requestBody.Artist, requestBody.Titre)
+	titleClean := cleanFTSInput(requestBody.Titre)
+	artistClean := cleanFTSInput(requestBody.Artist)
+	fmt.Printf("Recherche de la musique : %s / %s\n", artistClean, titleClean)
 
 	query := `
-	SELECT lyrics.synced_lyrics
-	FROM tracks
-	JOIN lyrics ON lyrics.id = tracks.last_lyrics_id
-	WHERE lyrics.synced_lyrics IS NOT NULL
-	AND tracks.name_lower LIKE ?
-	AND tracks.artist_name_lower LIKE ?
-	LIMIT 1
-	`
+		SELECT  l.synced_lyrics, tr.name_lower, tr.artist_name_lower
+		FROM    tracks_fts
+		JOIN    tracks      tr ON tr.id = tracks_fts.rowid
+		JOIN    lyrics      l  ON l.id  = tr.last_lyrics_id
+		WHERE   l.synced_lyrics IS NOT NULL
+		AND     tracks_fts MATCH ?
+		LIMIT 1;
+		`
 
-	rows := db.QueryRow(
-		query,
-		"%"+strings.ToLower(requestBody.Titre)+"%",
-		"%"+strings.ToLower(requestBody.Artist)+"%",
+	matchExpr := fmt.Sprintf(
+		`name_lower:"%s"* AND artist_name_lower:"%s"*`,
+		ftsEscape(titleClean),
+		ftsEscape(artistClean),
 	)
 
-	var syncedLyrics string
-	err = rows.Scan(&syncedLyrics)
+	rows := db.QueryRow(query, matchExpr)
+
+	var syncedLyrics, foundTitle, foundArtist string
+	err = rows.Scan(&syncedLyrics, &foundTitle, &foundArtist)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Paroles non trouvées"})
@@ -529,9 +537,72 @@ func searchmusic(c *gin.Context) {
 		return
 	}
 
+	fmt.Printf("Musique trouvée : %s / %s\n", foundArtist, foundTitle)
+
 	c.JSON(http.StatusOK, gin.H{
+
 		"artist":        requestBody.Artist,
 		"title":         requestBody.Titre,
 		"synced_lyrics": syncedLyrics,
 	})
+}
+
+func testBDD(c *gin.Context) {
+	start := time.Now()
+	found := 0
+	for _, list := range AllPlaylists {
+		for _, musique := range list {
+			payload := map[string]string{
+				"artist": musique.Artiste,
+				"title":  musique.Titre,
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				log.Printf("Erreur json.Marshal pour %s - %s : %v", musique.Titre, musique.Artiste, err)
+				continue
+			}
+
+			// Envoi de la requête
+			resp, err := http.Post(
+				"http://localhost:4000/api/searchmusic",
+				"application/json",
+				bytes.NewBuffer(body),
+			)
+			if err != nil {
+				log.Printf("Erreur http.Post pour %s - %s : %v", musique.Titre, musique.Artiste, err)
+				continue
+			}
+
+			if resp.StatusCode == 200 {
+				found++
+			}
+			resp.Body.Close()
+		}
+	}
+	fmt.Println("timeDuration :", time.Since(start).Seconds())
+	fmt.Println("totalFound : ", found)
+
+	c.JSON(http.StatusOK, gin.H{
+		"timeDuration": time.Since(start).Seconds(),
+		"totalFound":   found,
+	})
+}
+
+func ftsEscape(s string) string {
+	return strings.ReplaceAll(s, `"`, `""`)
+}
+
+func cleanFTSInput(s string) string {
+	s = strings.ToLower(s)
+	s = strings.ReplaceAll(s, `"`, "")  // enlever les guillemets
+	s = strings.ReplaceAll(s, "’", "'") // apostrophe unicode
+	s = strings.Split(s, "-")[0]        // retirer version entre tirets
+	s = strings.Split(s, "(")[0]        // retirer version entre parenthèses
+	s = strings.Split(s, "feat")[0]     // retirer les featurings
+	s = strings.Split(s, "ft.")[0]
+	s = strings.Split(s, "&")[0]
+	s = strings.Split(s, "/")[0]
+	s = strings.Split(s, ",")[0]
+	s = strings.TrimSpace(s)
+	return s
 }
